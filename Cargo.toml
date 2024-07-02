@@ -1,0 +1,18 @@
+[package]
+name = "dr_rf2_plugin"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0"
+description = "rF2 SharedMemoryMap reader for DataRace"
+
+[lib]
+crate-type = ["cdylib"]
+bench = false
+
+[build-dependencies]
+# built = "0.7"
+
+[dependencies]
+datarace_plugin_api = { git = "https://github.com/LukasLichten/DataRace.git", branch = "master" }
+steamlocate = "1.2.1"
+proton-finder = "1.0.0"
