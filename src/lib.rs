@@ -1,4 +1,6 @@
-use datarace_plugin_api::wrappers::{DataStoreReturnCode, Message, PluginHandle, Property, PropertyHandle};
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use datarace_plugin_api::{macros::{get_state, save_state_now}, wrappers::{Message, PluginHandle}};
 
 pub(crate) type PluginState = State;
 
@@ -9,128 +11,175 @@ datarace_plugin_api::macros::free_string_fn!();
 // You have to pass in literals (at least so far, unfortunatly)
 datarace_plugin_api::macros::plugin_descriptor_fn!("rF2-Reader", 0, 1, 0);
 
-// This generates the extern funcs, while also wrapping the types
-// you pass in the two function names that handle init and update
-// Optionally you pass in the statetype as the third value, which you will have to return out of
-// the init handle function (which will then be stored into the state)
-// But if you don't want the state automatically saved, you can save parse a boolean in as a forth
-// value and turn it off (ideal if you want to spin up a worker thread in the init function)
-// datarace_plugin_api::macros::generate_funcs!(handle_init, handle_update, PluginState);
+/// Mounts the memory maps
+mod share;
+/// Stores the game structs from the memory maps
+pub(crate) mod data;
+/// Contains the propertyhandles and does the writing to them
+mod reader;
 
-const PROP_HANDLE: PropertyHandle = datarace_plugin_api::macros::generate_property_handle!("rF2-Reader.Test");
-
-
-// Allows you to store data between invocations
 pub(crate) struct State {
-    lock_count: std::sync::atomic::AtomicU64,
+    // Used to lock the update thread
+    // 0 unlocked
+    // 1 is lock requested
+    // 2 is locked
+    // 3 plugin shutdown requested
+    // 4 plugin shutdown
+    // 100 updater offline
+    // 101 updater offline and locked
+    update_lock: AtomicU32,
 }
 
-// This function handles the init
-//
-// it takes a PluginHandle and returns Result<PluginState,ToString>
-// This means the state returned on Ok is automatically saved.
-// If you don't want to automatically save the state (spin up worker threads during init),
-// then set Return to Result<(),String>
-//
-// Err(String) does not have to be string, just be a Type implementing ToString.
-// Returning Err will shutdown the plugin
+// This is temporary
+struct Helper {
+    handle: PluginHandle
+}
+
+unsafe impl Sync for Helper {}
+unsafe impl Send for Helper {}
+
 #[datarace_plugin_api::macros::plugin_init]
-fn handle_init(handle: PluginHandle) -> Result<PluginState,String> {
-    match handle.create_property("Test", PROP_HANDLE, Property::Int(5)) {
-        DataStoreReturnCode::Ok => {
-            // let v = api::get_property_value(&handle, &prop_handle).unwrap();
-            // api::log_info(&handle, format!("{}", match v { Property::Int(i) => i.to_string(), _ => "NAN".to_string() }));
-        },
-        e => handle.log_error(e)
-    };
+fn handle_init(handle: PluginHandle) -> Result<(),String> {
+    // Installation of memory map bridge (on linux) and plugin
+    share::init_setup(&handle)?;
 
-    // handle.subscribe_property(PROP_HANDLE);
+    // Property creation
+    reader::init_properties(&handle)?;
 
-    let _ = handle.create_property("extra", datarace_plugin_api::macros::generate_property_handle!("rF2-Reader.extra"), Property::Str("We are number 2".to_string()));
+    // State
+    let state = State { update_lock: AtomicU32::new(100) };
+    unsafe { save_state_now!(handle, state) };
 
-    Ok(State { lock_count: std::sync::atomic::AtomicU64::default() })
-    // Ok(())
+    let h = Helper { handle };
+    std::thread::spawn(|| updater(h));
+
+
+    // Ok(state)
+    Ok(())
 }
 
-// This function deals with messages during runtime
-// it takes a PluginHandle and Message, and returns Result<(),ToString>
-//
-// Err(String) does not have to be string, just be a Type implementing ToString.
-// Returning Err will shutdown the plugin
 #[datarace_plugin_api::macros::plugin_update]
 fn handle_update(handle: PluginHandle, msg: Message) -> Result<(), String> {
+    let state = get_state!(handle).ok_or("Unable to aquire plugin state")?;
+
+    handle.log_info(state.update_lock.load(Ordering::Acquire));
+
     match msg {
         Message::Lock => {
-            // This message comes in to lock the plugin handle to perform some write (like creating
-            // a Property). This means we need to stop performing any reads on the handle
-            // till we are unlocked again.
-            // So we need to stop/hold any seperate threads.
-            // The lock applies after this function call returns
+            // Handling the lock
+            match state.update_lock.load(Ordering::Acquire) {
+                2 => (), // already locked
+                100 => {
+                    // Preventing launching of the update thread
+                    if let Err(_) = state.update_lock.compare_exchange(100, 101, Ordering::AcqRel, Ordering::Acquire) {
+                        // Launched anyway, so we now go stop the running thread
+                        return handle_update(handle, msg); 
+                    }
+                },
+                101 => (), // not started, but locked
+                _ =>  {
+                    state.update_lock.store(1, Ordering::Release); // Sending request to lock
+                    while state.update_lock.load(Ordering::Acquire) == 1 {
+                        atomic_wait::wait(&state.update_lock, 1);
+                    }
+                    // Process locked
+                }
+            }
             
-            // As this sample doesn't have a seperate thread currently we just log something instead
-            handle.log_info("Received Lock");
 
         },
         Message::Unlock => {
-            // The pluginloader has finished write operations (for now) and we can resume
-            // computation
+            // Handling the unlock
+            match state.update_lock.load(Ordering::Acquire) {
+                2 | 10 => {
+                    state.update_lock.store(0, Ordering::Release);
+                    atomic_wait::wake_all(&state.update_lock);
+                },
+                101 => {
+                    state.update_lock.store(100, Ordering::Release);
+                    atomic_wait::wake_all(&state.update_lock); // We wake here to allow locked
+                    // startups to escape
+                },
+                _ => ()
+            }
             
-            // Again, sample does not have a seperate thread currently, so we log
-    
-            let state = datarace_plugin_api::macros::get_state!(handle).ok_or("No state :(".to_string())?;
-            handle.log_info(format!("Received Unlock #{}", state.lock_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
 
-            let start = std::time::Instant::now();
-
-            match handle.get_property_value(PROP_HANDLE) {
-                Ok(val) => {
-                    handle.log_info(format!("Value is {}", val.to_string()));
-                },
-                Err(e) => {
-                    handle.log_error(e);
-                    return Ok(()); 
-                }
-            }
-
-            let res = handle.update_property(PROP_HANDLE, Property::Int(2));
-            if res != DataStoreReturnCode::Ok {
-                handle.log_error(res);
-                return Ok(()); 
-            }
-
-            match handle.get_property_value(PROP_HANDLE) {
-                Ok(val) => {
-                    handle.log_info(format!("Value is {}", val.to_string()));
-                },
-                Err(e) => {
-                    handle.log_error(e);
-                }
-            }
-
-            let later = std::time::Instant::now();
-
-            let res = handle.change_property_type(PROP_HANDLE, Property::Str(format!("{}us", (later-start).as_micros())));
-            match res {
-                DataStoreReturnCode::Ok => {
-                    handle.log_info("Changed");
-                },
-                _ => {
-                    handle.log_error(res);
-                }
-            }
         },
         Message::Shutdown => {
-            // Shutdown signal, so if we want to store some config, this would be a great place to
-            // save it.
-            // But it is of note that shutdown update is only send if the program is shutdown
-            // properly, if your plugin failed a previous update and got unloaded that way, then it
-            // won't be send
+            // Shutting down the update thread
+            if state.update_lock.swap(3, Ordering::AcqRel) < 100 {
+                while state.update_lock.load(Ordering::Acquire) == 3 {
+                    atomic_wait::wait(&state.update_lock, 3);
+                }
+            }
 
-            handle.log_info("See You, Space Cowboy...");
+            handle.log_info("Good Night!");
             unsafe { datarace_plugin_api::macros::drop_state_now!(handle) }
         },
-        _ => ()
+        Message::Unknown => {
+            handle.log_error("Unkown Message received (update this plugin)");
+        }
     }
 
     Ok(())
+}
+
+fn updater(handle: Helper) {
+    let handle = handle.handle;
+    
+    let sta = get_state!(handle).expect("Gimme!");
+    // Checking for startup handle lock
+    while let Err(v) = sta.update_lock.compare_exchange(100, 0, Ordering::AcqRel, Ordering::Acquire) {
+        match v {
+            101 => atomic_wait::wait(&sta.update_lock, v),
+            3 => return,
+            v => panic!("Updater unknown lock state {v} abort!")
+        };
+    }
+    handle.log_info("Updater Started");
+
+    let mut i:usize = 0;
+
+    loop {
+        match sta.update_lock.load(Ordering::Acquire) {
+            1 | 101 => {
+                sta.update_lock.store(2, Ordering::Release);
+                atomic_wait::wake_all(&sta.update_lock);
+
+                handle.log_info("Updater: Locking Down!");
+                while sta.update_lock.load(Ordering::Acquire) == 2 {
+                    atomic_wait::wait(&sta.update_lock, 2);
+                }
+                handle.log_info("Updater: Unlocked");
+            },
+            3 => {
+                handle.log_info("Updater: Shutdown");
+                sta.update_lock.store(4, Ordering::Release);
+                atomic_wait::wake_all(&sta.update_lock);
+                return;
+            },
+            9000 => {
+                // Placeholder for exit condition
+                break;
+            },
+            _ => ()
+        }
+
+        // Idk, do something
+        i = i.wrapping_add(1);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+
+    match sta.update_lock.swap(100, Ordering::AcqRel) {
+        1 | 101 => {
+            sta.update_lock.store(101, Ordering::Release);
+            atomic_wait::wake_all(&sta.update_lock);
+        },
+        3 => {
+            sta.update_lock.store(4, Ordering::Release);
+            atomic_wait::wake_all(&sta.update_lock);
+            return;
+        },
+        _ => ()
+    }
 }

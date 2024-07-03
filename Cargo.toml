@@ -16,3 +16,4 @@ bench = false
 datarace_plugin_api = { git = "https://github.com/LukasLichten/DataRace.git", branch = "master" }
 steamlocate = "1.2.1"
 proton-finder = "1.0.0"
+atomic-wait = "1.1.0"
