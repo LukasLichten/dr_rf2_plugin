@@ -12,11 +12,15 @@ datarace_plugin_api::macros::free_string_fn!();
 datarace_plugin_api::macros::plugin_descriptor_fn!("rF2-Reader", 0, 1, 0);
 
 /// Mounts the memory maps
+#[allow(dead_code)]
 mod share;
 /// Stores the game structs from the memory maps
+#[allow(dead_code)]
 pub(crate) mod data;
 /// Contains the propertyhandles and does the writing to them
 mod reader;
+
+pub use share::{MapHolder, SharedMemory};
 
 pub(crate) struct State {
     // Used to lock the update thread
@@ -124,21 +128,62 @@ fn handle_update(handle: PluginHandle, msg: Message) -> Result<(), String> {
     Ok(())
 }
 
+/// Contains the passive part, checking if the game is running, and launching the active part
 fn updater(handle: Helper) {
     let handle = handle.handle;
-    
     let sta = get_state!(handle).expect("Gimme!");
+
+
+    let mut runchecker_helper_state = if let Some(res) = share::GameRunningHelperState::new(&handle) {
+        res
+    } else {
+        handle.log_error("Updater aborting due to being unable to aquire necessary resources!");
+        // TODO implement a way to shutdown the plugin
+        return;
+    };
+
+
+
+    // Outer game check running loop
+    loop {
+
+        if share::check_if_game_running(&mut runchecker_helper_state) {
+            match share::connect(&mut runchecker_helper_state) {
+                Ok(mount) => {
+                    let exit = !runner_loop(sta, &handle, &mount);
+                    share::disconnect(&handle, &mut runchecker_helper_state, Some(mount));
+
+                    if exit {
+                        return;
+                    }
+                },
+                Err(e) => {
+                    share::disconnect(&handle, &mut runchecker_helper_state, None);
+                    handle.log_error(format!("Updater failed to mount memory maps (Retrying): {e}"));
+                }
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(5));
+
+    }
+}
+
+/// Contains to active update runner and it's locking mechanism
+/// return value indicates if programm should exit (false), or continue (true)
+fn runner_loop(sta: &PluginState, handle: &PluginHandle, mount: &MapHolder) -> bool {
+    // Game running, starting up loop
     // Checking for startup handle lock
     while let Err(v) = sta.update_lock.compare_exchange(100, 0, Ordering::AcqRel, Ordering::Acquire) {
         match v {
             101 => atomic_wait::wait(&sta.update_lock, v),
-            3 => return,
+            3 => return false,
             v => panic!("Updater unknown lock state {v} abort!")
         };
     }
     handle.log_info("Updater Started");
 
-    let mut i:usize = 0;
+    let mut reader_state = reader::ReaderState::default();
 
     loop {
         match sta.update_lock.load(Ordering::Acquire) {
@@ -156,7 +201,7 @@ fn updater(handle: Helper) {
                 handle.log_info("Updater: Shutdown");
                 sta.update_lock.store(4, Ordering::Release);
                 atomic_wait::wake_all(&sta.update_lock);
-                return;
+                return false;
             },
             9000 => {
                 // Placeholder for exit condition
@@ -165,21 +210,26 @@ fn updater(handle: Helper) {
             _ => ()
         }
 
-        // Idk, do something
-        i = i.wrapping_add(1);
-        std::thread::sleep(std::time::Duration::from_millis(1));
+        // Actual work
+        match reader::update_properties(handle, mount, &mut reader_state) {
+            Ok(_) => (),
+            Err(e) => {
+                handle.log_error(format!("Reading update failed: {e}"));
+            }
+        }
     }
 
     match sta.update_lock.swap(100, Ordering::AcqRel) {
         1 | 101 => {
             sta.update_lock.store(101, Ordering::Release);
             atomic_wait::wake_all(&sta.update_lock);
+            true
         },
         3 => {
             sta.update_lock.store(4, Ordering::Release);
             atomic_wait::wake_all(&sta.update_lock);
-            return;
+            false
         },
-        _ => ()
+        _ => true
     }
 }
