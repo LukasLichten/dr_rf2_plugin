@@ -1,4 +1,4 @@
-use std::{ffi::{c_void, CString}, marker::PhantomData, mem::size_of, os::fd::{AsRawFd, FromRawFd, OwnedFd}, path::PathBuf, process::Command};
+use std::{ffi::{c_void, CString}, marker::PhantomData, mem::size_of, os::fd::{AsRawFd, FromRawFd, OwnedFd}, path::PathBuf, process::{Command, Stdio}};
 
 use datarace_plugin_api::wrappers::PluginHandle;
 use proton_finder::GameDrive;
@@ -48,7 +48,7 @@ pub(crate) fn init_setup(handle: &PluginHandle) -> Result<(), String> {
         // Installing bridge
         
         // TODO
-        // return Err("bridge missing".to_string());
+        return Err("bridge missing".to_string());
     }
 
     
@@ -126,7 +126,7 @@ fn check_for_program_running(pid: Option<sysinfo::Pid>, name_frag: String) -> Op
         );
 
         if let Some(pro) = s.process(*pid) {
-            if pro.cmd().contains(&name_frag) {
+            if cmd_combiner(pro.cmd()).contains(&name_frag) {
                 return Some(pro.pid());
             } else {
                 // There is a foreign process running under our ID, we retry
@@ -145,7 +145,11 @@ fn check_for_program_running(pid: Option<sysinfo::Pid>, name_frag: String) -> Op
                 .with_cmd(sysinfo::UpdateKind::OnlyIfNotSet)
         );
 
-        if let Some(pro) = s.processes().values().find(|val| val.cmd().contains(&name_frag)) {
+        if let Some(pro) = s.processes().values().find(|val| {
+            // println!("Here with {}: {}", val.pid().to_string(), val.cmd());
+            cmd_combiner(val.cmd()).contains(&name_frag)
+            
+        }) {
             return Some(pro.pid());
         }
     }
@@ -153,26 +157,39 @@ fn check_for_program_running(pid: Option<sysinfo::Pid>, name_frag: String) -> Op
     None
 }
 
+fn cmd_combiner(cmd: &[String]) -> String {
+    let mut output = String::new();
+
+    for item in cmd {
+        output = format!("{output} {item}");
+    }
+
+    output
+}
+
 /// Checks if the game is running
 pub(crate) fn check_if_game_running(helper_state: &mut GameRunningHelperState) -> bool {
     // We find the stable entry process which cmdline looks something like this:
     // Z:\home\Lukas\.local\share\Steam\steamapps\common\Assetto Corsa Competizione\acc.exe
-    let rf2_bin_name = "rFactor 2\\Bin\\rFactor 2.exe".to_string();
+    // let rf2_bin_name = "rFactor 2/Launcher/Launch rFactor.exe".to_string();
+    let rf2_bin_name = "rFactor 2\\Bin64\\rFactor2.exe".to_string();
+     
 
     helper_state.running = check_for_program_running(helper_state.running, rf2_bin_name);
     helper_state.running.is_some()
 }
 
-/// Because rF2 memory maps start and end with $ we need to escape the first $, otherwise the
-/// entire name is read as an enviroment variable (and probably and empty one at that)
-fn format_mm_for_arg(mm_name: &str) -> String {
-    format!("\\{mm_name}")
+fn check_for_bridge(helper_state: &mut GameRunningHelperState) -> bool {
+    helper_state.bridge = check_for_program_running(helper_state.bridge, format!("DataRace\\{}", BRIDGE_EXE_NAME));
+    
+    helper_state.bridge.is_some()
 }
 
-pub(crate) fn connect(helper_state: &mut GameRunningHelperState) -> Result<MapHolder, String> {
-    helper_state.bridge = check_for_program_running(helper_state.bridge, BRIDGE_EXE_NAME.to_string());
+pub(crate) fn connect(handle: &PluginHandle, helper_state: &mut GameRunningHelperState) -> Result<MapHolder, String> {
 
-    if helper_state.bridge.is_none() {
+    if !check_for_bridge(helper_state) {
+        handle.log_info("bridge was not running, launching bridge");
+
         // Spawning a new bridge process
         let res = Command::new("protontricks-launch")
             .arg("--appid")
@@ -180,17 +197,21 @@ pub(crate) fn connect(helper_state: &mut GameRunningHelperState) -> Result<MapHo
             .arg(helper_state.bridge_path.as_os_str())
             
             .arg("--map")
-            .arg(format_mm_for_arg(MM_TELEMETRY_FILE_NAME))
+            .arg(MM_TELEMETRY_FILE_NAME)
 
 
             .arg("--size")
             .arg(size_of::<PageTelemetry>().to_string())
 
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+
             
             .spawn();
 
         match res {
-            Ok(child) => helper_state.bridge = Some(sysinfo::Pid::from_u32(child.id())),
+            Ok(_) => (),
             Err(e) => {
                 helper_state.bridge = None;
                 return Err(format!("Failed to launch shm-bridge: {}", e.to_string()))
@@ -200,8 +221,7 @@ pub(crate) fn connect(helper_state: &mut GameRunningHelperState) -> Result<MapHo
         // Let the proton and the programm spinup
         std::thread::sleep(std::time::Duration::from_secs(5));
 
-        helper_state.bridge = check_for_program_running(helper_state.bridge, BRIDGE_EXE_NAME.to_string());
-        if helper_state.bridge.is_none() {
+        if !check_for_bridge(helper_state) {
             return Err("Failed to launch shm-bridge: Crashed on startup".to_string());
         }
     }
@@ -226,10 +246,13 @@ pub(crate) fn disconnect(handle: &PluginHandle, helper_state: &mut GameRunningHe
             );
 
             if let Some(pro) = s.process(pid) {
-                pro.kill();
+                pro.kill_with(sysinfo::Signal::Interrupt);
+                // pro.kill();
                 
                 std::thread::sleep(std::time::Duration::from_secs(2));
-                helper_state.bridge = check_for_program_running(Some(pid), BRIDGE_EXE_NAME.to_string());
+                if check_for_bridge(helper_state) {
+                    handle.log_error("Failed to shutdown bridge, kill it manually!");
+                }
                 
                 // TODO shm-bridge clean up run
             } else {

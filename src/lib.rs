@@ -34,14 +34,6 @@ pub(crate) struct State {
     update_lock: AtomicU32,
 }
 
-// This is temporary
-struct Helper {
-    handle: PluginHandle
-}
-
-unsafe impl Sync for Helper {}
-unsafe impl Send for Helper {}
-
 #[datarace_plugin_api::macros::plugin_init]
 fn handle_init(handle: PluginHandle) -> Result<(),String> {
     // Installation of memory map bridge (on linux) and plugin
@@ -54,8 +46,6 @@ fn handle_init(handle: PluginHandle) -> Result<(),String> {
     let state = State { update_lock: AtomicU32::new(100) };
     unsafe { save_state_now!(handle, state) };
 
-    let h = Helper { handle };
-    std::thread::spawn(|| updater(h));
 
 
     // Ok(state)
@@ -69,6 +59,10 @@ fn handle_update(handle: PluginHandle, msg: Message) -> Result<(), String> {
     handle.log_info(state.update_lock.load(Ordering::Acquire));
 
     match msg {
+        Message::StartupFinished => {
+            handle.log_info("Startup completed, starting background worker thread");
+            std::thread::spawn(|| updater(handle));
+        },
         Message::Lock => {
             // Handling the lock
             match state.update_lock.load(Ordering::Acquire) {
@@ -120,7 +114,20 @@ fn handle_update(handle: PluginHandle, msg: Message) -> Result<(), String> {
             handle.log_info("Good Night!");
             unsafe { datarace_plugin_api::macros::drop_state_now!(handle) }
         },
-        Message::Unknown => {
+        Message::InternalMsg(num) => {
+            match num {
+                -1 => {
+                    // TODO implement graceful shutdown option once available
+
+                    
+                    unsafe { datarace_plugin_api::macros::drop_state_now!(handle) }
+                    return Err("Background thread shutdown, crashing the plugin!".to_string());
+                },
+                _ => ()
+            }
+        },
+        Message::OtherPluginStarted(_) => (),
+        _ => {
             handle.log_error("Unkown Message received (update this plugin)");
         }
     }
@@ -129,8 +136,7 @@ fn handle_update(handle: PluginHandle, msg: Message) -> Result<(), String> {
 }
 
 /// Contains the passive part, checking if the game is running, and launching the active part
-fn updater(handle: Helper) {
-    let handle = handle.handle;
+fn updater(handle: PluginHandle) {
     let sta = get_state!(handle).expect("Gimme!");
 
 
@@ -138,6 +144,7 @@ fn updater(handle: Helper) {
         res
     } else {
         handle.log_error("Updater aborting due to being unable to aquire necessary resources!");
+        handle.send_internal_msg(-1);
         // TODO implement a way to shutdown the plugin
         return;
     };
@@ -148,9 +155,12 @@ fn updater(handle: Helper) {
     loop {
 
         if share::check_if_game_running(&mut runchecker_helper_state) {
-            match share::connect(&mut runchecker_helper_state) {
+            handle.log_info("Game is detected running, starting updater...");
+
+            match share::connect(&handle, &mut runchecker_helper_state) {
                 Ok(mount) => {
-                    let exit = !runner_loop(sta, &handle, &mount);
+                    let exit = !runner_loop(sta, &handle, &mount, &mut runchecker_helper_state);
+                    handle.log_info("Exiting Updater...");
                     share::disconnect(&handle, &mut runchecker_helper_state, Some(mount));
 
                     if exit {
@@ -171,7 +181,7 @@ fn updater(handle: Helper) {
 
 /// Contains to active update runner and it's locking mechanism
 /// return value indicates if programm should exit (false), or continue (true)
-fn runner_loop(sta: &PluginState, handle: &PluginHandle, mount: &MapHolder) -> bool {
+fn runner_loop(sta: &PluginState, handle: &PluginHandle, mount: &MapHolder, runchecker_helper_state: &mut share::GameRunningHelperState) -> bool {
     // Game running, starting up loop
     // Checking for startup handle lock
     while let Err(v) = sta.update_lock.compare_exchange(100, 0, Ordering::AcqRel, Ordering::Acquire) {
@@ -203,16 +213,13 @@ fn runner_loop(sta: &PluginState, handle: &PluginHandle, mount: &MapHolder) -> b
                 atomic_wait::wake_all(&sta.update_lock);
                 return false;
             },
-            9000 => {
-                // Placeholder for exit condition
-                break;
-            },
             _ => ()
         }
 
         // Actual work
-        match reader::update_properties(handle, mount, &mut reader_state) {
-            Ok(_) => (),
+        match reader::update_properties(handle, mount, &mut reader_state, runchecker_helper_state) {
+            Ok(true) => (),
+            Ok(false) => break,
             Err(e) => {
                 handle.log_error(format!("Reading update failed: {e}"));
             }
