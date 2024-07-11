@@ -33,6 +33,31 @@ type String16 = [u8; 16];
 type String12 = [u8; 12];
 type Garbage = u8;
 
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CharBool {
+    False = 0,
+    True = 1,
+    Unkown
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RF2RearFlapLegalStatus {
+  Disallowed = 0,
+  DetectedButNotAllowedYet = 1,
+  Allowed = 2
+}
+
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RF2IgnitionStarterStatus {
+  Off = 0,
+  Ignition = 1,
+  IgnitionAndStarter = 2
+}
+
 #[repr(C, packed(4))]
 #[derive(Copy, Clone, Debug, Default)]
 pub struct PageVec3 {
@@ -205,8 +230,8 @@ pub struct PageVehicleTelemetry {
     pub front_flap_activated: u8,
     /// whether rear flap is activated    
     pub rear_flap_activated: u8,
-    pub rear_flap_legal_status: u8,
-    pub ignition_starter: u8,
+    pub rear_flap_legal_status: RF2RearFlapLegalStatus,
+    pub ignition_starter: RF2IgnitionStarterStatus,
 
     /// name of front tire compound    
     pub front_tire_compound_name: String18,

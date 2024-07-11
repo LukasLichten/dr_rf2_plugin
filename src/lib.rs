@@ -36,6 +36,8 @@ pub(crate) struct State {
 
 #[datarace_plugin_api::macros::plugin_init]
 fn handle_init(handle: PluginHandle) -> Result<(),String> {
+    // reader::init_properties(&handle)?; // Testing
+
     // Installation of memory map bridge (on linux) and plugin
     share::init_setup(&handle)?;
 

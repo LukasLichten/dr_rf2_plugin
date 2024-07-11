@@ -3,7 +3,7 @@ use std::{ffi::{c_void, CString}, marker::PhantomData, mem::size_of, os::fd::{As
 use datarace_plugin_api::wrappers::PluginHandle;
 use proton_finder::GameDrive;
 
-use crate::data::PageTelemetry;
+use crate::data::{PageScoring, PageTelemetry};
 
 const BRIDGE_EXE_NAME:&'static str = "shm-bridge-rf2.exe";
 const GAME_ID:u32 = 365960;
@@ -19,7 +19,7 @@ const MM_SCORING_FILE_NAME:&'static str = "$rFactor2SMMP_Scoring$";
 /// 3 fps
 const MM_RULES_FILE_NAME:&'static str = "$rFactor2SMMP_Rules$";
 /// Once per session
-const MM_MULIT_RULES_FILE_NAME:&'static str = "$rFactor2SMMP_MultiRules$";
+const MM_MULTI_RULES_FILE_NAME:&'static str = "$rFactor2SMMP_MultiRules$";
 /// 400 fps
 const MM_FORCE_FEEDBACK_FILE_NAME:&'static str = "$rFactor2SMMP_ForceFeedback$";
 /// 400 fps, default unsubscribed
@@ -198,10 +198,12 @@ pub(crate) fn connect(handle: &PluginHandle, helper_state: &mut GameRunningHelpe
             
             .arg("--map")
             .arg(MM_TELEMETRY_FILE_NAME)
+            .arg(MM_SCORING_FILE_NAME)
 
 
             .arg("--size")
             .arg(size_of::<PageTelemetry>().to_string())
+            .arg(size_of::<PageScoring>().to_string())
 
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -228,7 +230,8 @@ pub(crate) fn connect(handle: &PluginHandle, helper_state: &mut GameRunningHelpe
 
     // Mounting the memory maps
     Ok(MapHolder {
-        telemetry: SharedMemory::<PageTelemetry>::connect(MM_TELEMETRY_FILE_NAME)?
+        telemetry: SharedMemory::<PageTelemetry>::connect(MM_TELEMETRY_FILE_NAME)?,
+        scoring: SharedMemory::<PageScoring>::connect(MM_SCORING_FILE_NAME)?
     })
 }
 
@@ -266,7 +269,8 @@ pub(crate) fn disconnect(handle: &PluginHandle, helper_state: &mut GameRunningHe
 
 /// Holds all the memory maps
 pub struct MapHolder {
-    pub telemetry: SharedMemory<PageTelemetry>
+    pub telemetry: SharedMemory<PageTelemetry>,
+    pub scoring: SharedMemory<PageScoring>
 }
 
 // Simetry
