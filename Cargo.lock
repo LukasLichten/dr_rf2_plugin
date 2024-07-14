@@ -144,7 +144,7 @@ dependencies = [
 [[package]]
 name = "datarace_plugin_api"
 version = "0.1.0"
-source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#14363ee02465d9afbccf026f08bfbb638e7c3875"
+source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#49e3b54b5a23d64f5e03f7e5be043caf8aabab6c"
 dependencies = [
  "datarace_plugin_api_macro",
  "datarace_plugin_api_sys",
@@ -153,7 +153,7 @@ dependencies = [
 [[package]]
 name = "datarace_plugin_api_macro"
 version = "0.1.0"
-source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#14363ee02465d9afbccf026f08bfbb638e7c3875"
+source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#49e3b54b5a23d64f5e03f7e5be043caf8aabab6c"
 dependencies = [
  "datarace_plugin_api_sys",
  "quote",
@@ -163,7 +163,7 @@ dependencies = [
 [[package]]
 name = "datarace_plugin_api_sys"
 version = "0.1.0"
-source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#14363ee02465d9afbccf026f08bfbb638e7c3875"
+source = "git+https://github.com/LukasLichten/DataRace.git?branch=master#49e3b54b5a23d64f5e03f7e5be043caf8aabab6c"
 dependencies = [
  "bindgen",
  "built",

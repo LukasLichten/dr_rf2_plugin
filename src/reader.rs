@@ -334,7 +334,6 @@ pub(crate) fn update_properties(handle: &PluginHandle, mount: &MapHolder, state:
 
     let telemetry_timing = std::time::Instant::now();
     if state.telemetry_update_version != mount.telemetry.get().header.version_update_begin {
-        state.version_last_increment = None;
 
         // Reference into memory that can be actively changed
         // Not great, but we hold this for a moment to find the player car
@@ -346,6 +345,8 @@ pub(crate) fn update_properties(handle: &PluginHandle, mount: &MapHolder, state:
         } else {
             MAX_MAPPED_VEHICLES
         };
+
+        let mut not_found = true;
 
         for i in 0..num_vehicles {
             let veh = unstable.vehicles[i];
@@ -363,8 +364,19 @@ pub(crate) fn update_properties(handle: &PluginHandle, mount: &MapHolder, state:
 
                     handle.update_property(P_TELEMETRY_UPDATE, Property::from(begin));
                     handle.update_property(P_DEBUG_TELEMETRY_TIME, Property::from(std::time::Instant::now() - telemetry_timing));
+
+                    // Reason we are doing this is to prevent a torn frame from deadlocking us
+                    not_found = false;
                 }
+
+                break;
             }
+        }
+
+        if not_found && state.version_last_increment.is_none() {
+            state.version_last_increment = Some(std::time::Instant::now());
+        } else if !not_found {
+            state.version_last_increment = None;
         }
 
     } else if state.version_last_increment.is_none() {
@@ -383,8 +395,10 @@ pub(crate) fn update_properties(handle: &PluginHandle, mount: &MapHolder, state:
             // handle.log_info("Time is up!");
             if check_if_game_running(runner_checkgame_state) {
                 // Game still running, reset timer
+                // handle.log_info("Game still running");
                 state.version_last_increment = Some(now);
             } else {
+                // handle.log_info("Game no longer running");
                 return Ok(false);
             }
         }
@@ -470,6 +484,7 @@ fn read_telemetry(handle: &PluginHandle, update: PageVehicleTelemetry, cache: &m
     handle.update_property(P_TELEMETRY_ENGINE_TURBO_BOOST_PRESSURE, Property::from(update.turbo_boost_pressure));
     handle.update_property(P_TELEMETRY_PHYSICAL_WHEEL_RANGE, Property::from(update.physical_steering_wheel_range)); // infrequently
 
+    // handle.log_info(format!("Time: {}", handle.get_property_value(P_TELEMETRY_SESSION_ELAPSED_TIME).unwrap().to_duration().unwrap().0.as_secs_f64()));
 }
 
 fn read_scoring(_handle: &PluginHandle, update: PageScoring, state: &mut ReaderState) {
@@ -497,10 +512,11 @@ fn read_scoring(_handle: &PluginHandle, update: PageScoring, state: &mut ReaderS
 fn help_read_string(handle: &PluginHandle, slice: &[u8], cache: &mut String, property: PropertyHandle) {
     let read = String::from_utf8_lossy(slice);
 
-    if read == cache.as_str() {
+    if read != cache.as_str() {
         // Change detected
         *cache = read.to_string();
 
-        handle.update_property(property, Property::Str(cache.to_string()));
+        let fix = cache.to_string();
+        handle.update_property(property, Property::Str(fix));
     }
 }

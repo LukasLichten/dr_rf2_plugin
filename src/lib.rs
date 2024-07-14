@@ -228,6 +228,8 @@ fn runner_loop(sta: &PluginState, handle: &PluginHandle, mount: &MapHolder, runc
         }
     }
 
+    // handle.log_info("Hewo!");
+
     match sta.update_lock.swap(100, Ordering::AcqRel) {
         1 | 101 => {
             sta.update_lock.store(101, Ordering::Release);
